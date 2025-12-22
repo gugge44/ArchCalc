@@ -433,7 +433,8 @@ for r in st.session_state.pls:
 
 st.subheader("📈 Preview")
 fig_l = plot_loading(g, L); st.pyplot(fig_l); plt.close(fig_l)
-tot = np.trapz(g.q, g.x) + sum(P for P,_ in g.pls)
+tot = np.trapezoid(g.q, g.x) + sum(P for P,_ in g.pls)
+
 st.info(f"**Total: {tot:.1f} kN**")
 
 st.divider()
