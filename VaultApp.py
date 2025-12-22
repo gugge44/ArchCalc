@@ -532,7 +532,11 @@ for r in st.session_state.pls:
 
 st.subheader("📈 Preview")
 fig_l = plot_loading(g, L); st.pyplot(fig_l); plt.close(fig_l)
-trapz = getattr(np, "trapezoid", getattr(np, "trapz"))  # NumPy>=2 uses trapezoid; older uses trapz
+try:
+    trapz = np.trapezoid   # NumPy ≥ 2.0
+except AttributeError:
+    trapz = np.trapz       # NumPy < 2.0
+
 tot = trapz(g.q, g.x) + sum(P for P,_ in g.pls)
 
 st.info(f"**Total: {tot:.1f} kN**")
