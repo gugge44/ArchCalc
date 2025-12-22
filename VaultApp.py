@@ -26,8 +26,11 @@ def build_docx_python(
     RA: float, RB: float,
     info: dict,
     load_png, res_png,
-    beam_x: np.ndarray, beam_V: np.ndarray, beam_M: np.ndarray, beam_RA: float, beam_RB: float
+    beam_x: np.ndarray, beam_V: np.ndarray, beam_M: np.ndarray, beam_RA: float, beam_RB: float,
+    b_eff: float, fcd: float,
+    N_max: float, a_max: float, x_a: float, t_total: float
 ) -> bytes:
+
     doc = Document()
 
     # ---------- basic style ----------
@@ -188,8 +191,23 @@ def build_docx_python(
         ("R_A", f"{RA:.3f} kN"),
         ("R_B", f"{RB:.3f} kN"),
     ])
+    
+    add_h(2, "6.1 Compression strut sizing (capacity check)")
+    add_kv_table([
+        ("Effective width b", f"{b_eff:.3f} m"),
+        ("Compression capacity f_cd", f"{fcd:.3f} MPa"),
+        ("N_max", f"{N_max:.3f} kN"),
+        ("a_max = N_max/(b·f_cd)", f"{a_max*1000:.1f} mm"),
+        ("at x", f"{x_a:.3f} m"),
+        ("t_total = t_req + a_max", f"{t_total*1000:.1f} mm"),
+    ])
+    doc.add_paragraph(
+        "Note: a(x) is a symmetric compression strut thickness required to fit a finite compression zone at the admissible thrust position. "
+        "The plotted dashed envelope corresponds to ±(t_req/2 + a(x)/2) about the centreline along the local normal."
+    )
 
-    add_h(2, "6.1 Contact (hinge) locations")
+
+    add_h(2, "6.2 Contact (hinge) locations")
     if clusters:
         xx = sol["x"]
         rows = []
@@ -201,14 +219,16 @@ def build_docx_python(
     else:
         doc.add_paragraph("No contact clusters detected (check tolerances / δ / discretisation).")
 
-    add_h(2, "6.2 Diagrams")
+    add_h(2, "6.3 Diagrams")
     doc.add_picture(str(res_png), width=Inches(6.5))
 
     add_h(1, "7. Conclusion")
     doc.add_paragraph(
-        f"Minimum required thickness (lower-bound geometric condition) is t = {sol['t_req']*1000:.1f} mm "
-        f"at H = {sol['H']:.1f} kN."
+        f"Geometric lower-bound thickness is t_req = {sol['t_req']*1000:.1f} mm at H = {sol['H']:.1f} kN. "
+        f"With compression strut capacity (b = {b_eff:.2f} m, f_cd = {fcd:.2f} MPa), the required additional strut thickness is "
+        f"a_max = {a_max*1000:.1f} mm, giving total thickness t_total = {t_total*1000:.1f} mm."
     )
+
 
     bio = BytesIO()
     doc.save(bio)
@@ -263,8 +283,10 @@ class LoadGrid:
         self.q = np.zeros_like(self.x)
         self.pls = []
     def udl(self, w, xa=0, xb=None):
-        xb = xb or self.L
+        if xb is None:
+            xb = self.L
         self.q[(self.x >= xa) & (self.x <= xb)] += w
+
     def vdl(self, w0, w1, xa, xb):
         m = (self.x >= xa) & (self.x <= xb)
         t = (self.x[m] - xa) / (xb - xa)
@@ -336,29 +358,100 @@ def contact_clusters(xx, e, delta):
         else: i += 1
     return clusters
 
-def plot_results(sol, L, f, clusters):
+def plot_results(sol, L, f, clusters, a_sol=None, V_sol=None, N_sol=None):
     xx, yc, nx, ny, e = sol["x"], sol["yc"], sol["nx"], sol["ny"], sol["e"]
     t, H = sol["t_req"], sol["H"]
-    fig, axes = plt.subplots(3, 1, figsize=(12, 10), gridspec_kw={"height_ratios": [2.2, 1.1, 1.1]})
+
+    # If caller didn't pass N_sol, compute it (best effort)
+    if N_sol is None and V_sol is not None:
+        N_sol = np.sqrt(H**2 + V_sol**2)
+
+    # 4 rows now: geometry, M, e, N
+    fig, axes = plt.subplots(
+        4, 1, figsize=(12, 12),
+        gridspec_kw={"height_ratios": [2.2, 1.1, 1.1, 1.1]}
+    )
+
+    # --- (1) Geometry / thrust ---
     ax = axes[0]
-    ax.fill_between(xx + t/2*nx, yc + t/2*ny, yc - t/2*ny, alpha=0.2, color='blue')
-    ax.plot(xx + t/2*nx, yc + t/2*ny, "k-", lw=1.5)
-    ax.plot(xx - t/2*nx, yc - t/2*ny, "k-", lw=1.5)
+
+    # Optional envelope + strut thickness (dashed)
+    if a_sol is not None:
+        a = a_sol
+        ax.plot(xx + (t/2 + a/2)*nx, yc + (t/2 + a/2)*ny, "k--", lw=1.2, label="Envelope + strut")
+        ax.plot(xx - (t/2 + a/2)*nx, yc - (t/2 + a/2)*ny, "k--", lw=1.2)
+
+    # Fill the geometric thickness band properly (polygon)
+    x_up = xx + (t/2)*nx
+    y_up = yc + (t/2)*ny
+    x_dn = xx - (t/2)*nx
+    y_dn = yc - (t/2)*ny
+    ax.fill(np.r_[x_up, x_dn[::-1]], np.r_[y_up, y_dn[::-1]], alpha=0.2)
+
+    ax.plot(x_up, y_up, "k-", lw=1.5)
+    ax.plot(x_dn, y_dn, "k-", lw=1.5)
+
     ax.plot(xx, yc, "b-", lw=2, alpha=0.7, label="Centreline")
     ax.plot(xx + e*nx, yc + e*ny, "r--", lw=2, label="Thrust line")
+
     for i0, i1, sgn in clusters:
-        xh = 0.5*(xx[i0]+xx[i1])
+        xh = 0.5*(xx[i0] + xx[i1])
         nxh, nyh = unit_normal(np.array([xh]), L, f)
         ych = y_arch(xh, L, f)
         ax.plot(xh + sgn*t/2*nxh[0], ych + sgn*t/2*nyh[0], "go", ms=12, mec="k", mew=2)
-    ax.set_title(f"H = {H:.1f} kN, t_req = {t*1000:.1f} mm"); ax.legend(); ax.grid(alpha=0.25); ax.set_aspect('equal')
-    axes[1].fill_between(xx, sol["M"], alpha=0.3); axes[1].plot(xx, sol["M"], 'b-', lw=2)
-    axes[1].set_title("Beam Moment"); axes[1].grid(alpha=0.25)
-    axes[2].fill_between(xx, e, alpha=0.3, color='orange'); axes[2].plot(xx, e, 'orange', lw=2)
-    axes[2].axhline(sol["delta"], ls="--", color='red'); axes[2].axhline(-sol["delta"], ls="--", color='red')
-    axes[2].set_title(f"Normal Offset δ = {sol['delta']*1000:.1f} mm"); axes[2].grid(alpha=0.25)
+
+    ax.set_title(f"H = {H:.1f} kN, t_req = {t*1000:.1f} mm")
+    ax.legend()
+    ax.grid(alpha=0.25)
+    ax.set_aspect("equal")
+
+    # --- (2) Beam moment ---
+    axes[1].fill_between(xx, sol["M"], alpha=0.3)
+    axes[1].plot(xx, sol["M"], lw=2)
+    axes[1].set_title("Beam Moment")
+    axes[1].grid(alpha=0.25)
+
+    # --- (3) Normal offset e(x) ---
+    axes[2].fill_between(xx, e, alpha=0.3)
+    axes[2].plot(xx, e, lw=2)
+    axes[2].axhline(sol["delta"], ls="--")
+    axes[2].axhline(-sol["delta"], ls="--")
+    axes[2].set_title(f"Normal Offset δ = {sol['delta']*1000:.1f} mm")
+    axes[2].grid(alpha=0.25)
+
+    # --- (4) Compressive force N(x) and strut thickness a(x) ---
+    axN = axes[3]
+    
+    if N_sol is not None:
+        # N(x) = solid line (left axis)
+        lineN, = axN.plot(xx, N_sol, lw=2, label="N(x) compressive resultant (kN)")
+        axN.fill_between(xx, N_sol, alpha=0.2)
+        axN.set_ylabel("N (kN)")
+        axN.grid(alpha=0.25)
+    
+        # a(x) = dashed line (right axis)
+        lines = [lineN]
+        labels = [lineN.get_label()]
+    
+        if a_sol is not None:
+            axA = axN.twinx()
+            lineA, = axA.plot(xx, a_sol*1000.0, ls="--", lw=1.8, label="a(x) strut thickness (mm)")
+            axA.set_ylabel("a (mm)")
+            lines.append(lineA)
+            labels.append(lineA.get_label())
+    
+        axN.set_title("Compressive resultant and required strut thickness")
+        axN.legend(lines, labels, loc="upper center", ncol=2)
+    else:
+        axN.set_title("Compressive resultant N(x) (not available)")
+        axN.grid(alpha=0.25)
+    
+    axN.set_xlabel("x (m)")
+
+
     plt.tight_layout()
     return fig
+
 
 def plot_loading(g, L):
     fig, ax = plt.subplots(figsize=(10, 3))
@@ -378,14 +471,20 @@ with st.sidebar:
     proj = st.text_input("Project", "Arch Analysis")
     auth = st.text_input("Author", "")
     date = st.date_input("Date")
+
     st.divider()
     st.header("📐 Geometry")
     L = st.number_input("Span L (m)", 1.0, 100.0, 20.0)
     f = st.number_input("Rise f (m)", 0.1, 50.0, 5.0)
     st.markdown(f"**Rise/Span:** {f/L:.1%}")
-    st.divider()
     dx = st.number_input("Grid (m)", 0.005, 0.5, 0.02, format="%.3f")
     H_max = st.number_input("Max H (kN)", 100.0, 1e6, 50000.0)
+
+    st.divider()
+    st.header("🧱 Material / Capacity")
+    b_eff = st.number_input("Effective width into page b_eff (m)", min_value=0.01, value=1.0, step=0.1)
+    fcd  = st.number_input("Compression capacity f_cd (MPa)", min_value=0.0, value=3.0, step=0.5)
+
 
 st.header("📊 Loading")
 
@@ -433,7 +532,8 @@ for r in st.session_state.pls:
 
 st.subheader("📈 Preview")
 fig_l = plot_loading(g, L); st.pyplot(fig_l); plt.close(fig_l)
-tot = np.trapezoid(g.q, g.x) + sum(P for P,_ in g.pls)
+trapz = getattr(np, "trapezoid", np.trapz)  # NumPy>=2 uses trapezoid; older uses trapz
+tot = trapz(g.q, g.x) + sum(P for P,_ in g.pls)
 
 st.info(f"**Total: {tot:.1f} kN**")
 
@@ -445,16 +545,23 @@ if st.button("🔍 Run Analysis", type="primary"):
         def M_of(xq):
             return np.interp(xq, x_b, M_b)
 
-        _, _, _, RA, RB = beam_MV(g)
-        sol = find_best_H(lambda x: M_of(x), L, f, H_hi=H_max)
+        sol = find_best_H(M_of, L, f, H_hi=H_max)
+
         if sol:
             st.session_state.results = sol
             st.session_state.rx = (RA, RB)
             st.session_state.g_stored = g
             st.session_state.L_s, st.session_state.f_s = L, f
+
+            # store beam fields for stress
+            st.session_state.beam_x = x_b
+            st.session_state.beam_V = V_b
+            st.session_state.beam_M = M_b
+
             st.success("Done!")
         else:
             st.error("Failed")
+
 
 if st.session_state.results:
     sol = st.session_state.results
@@ -463,6 +570,7 @@ if st.session_state.results:
     L_s, f_s = st.session_state.L_s, st.session_state.f_s
     
     st.header("📊 Results")
+    
     cols = st.columns(4)
     cols[0].metric("H", f"{sol['H']:.1f} kN")
     cols[1].metric("t_req", f"{sol['t_req']*1000:.1f} mm")
@@ -474,10 +582,47 @@ if st.session_state.results:
     if clusters:
         st.table(pd.DataFrame([{"#": k, "x": f"{0.5*(sol['x'][i0]+sol['x'][i1]):.3f} m", "Side": "EXT" if s>0 else "INT"} for k,(i0,i1,s) in enumerate(clusters,1)]))
     
+    # --- Axial compressive strut requirement ---
+    V_sol = np.interp(sol["x"], st.session_state.beam_x, st.session_state.beam_V)  # kN
+    N_sol = np.sqrt(sol["H"]**2 + V_sol**2)  # kN
+    
+    t_geo = float(sol["t_req"])  # = 2δ
+    
+    if b_eff > 0 and fcd > 0:
+        fcd_kNpm2 = 1000.0 * fcd  # MPa -> kN/m²
+        a_sol = N_sol / (b_eff * fcd_kNpm2)
+        i = int(np.argmax(a_sol))
+        a_max = float(a_sol[i])
+        x_a = float(sol["x"][i])
+        N_max = float(np.max(N_sol))
+        t_total = t_geo + a_max
+    else:
+        a_sol = None
+        a_max = float("nan")
+        x_a = float("nan")
+        N_max = float(np.max(N_sol))   # still useful even if capacity not provided
+        t_total = float("nan")
+    
+    cS1, cS2, cS3, cS4 = st.columns(4)
+    cS1.metric("N_max", f"{N_max:.1f} kN")
+    cS2.metric("a_max (strut)", f"{a_max*1000:.1f} mm")
+    cS3.metric("at x", f"{x_a:.2f} m")
+    cS4.metric("t_total = t_req + a_max", f"{t_total*1000:.1f} mm")
+
+    
     st.subheader("📈 Diagrams")
-    fig = plot_results(sol, L_s, f_s, clusters); st.pyplot(fig)
-    buf = BytesIO(); fig.savefig(buf, format='png', dpi=150, bbox_inches='tight'); buf.seek(0)
+    fig = plot_results(sol, L_s, f_s, clusters, a_sol=a_sol, V_sol=V_sol, N_sol=N_sol)
+
+    
+    st.pyplot(fig)   # <-- THIS is what makes it appear
+    
+    buf = BytesIO()
+    fig.savefig(buf, format="png", dpi=150, bbox_inches="tight")
+    buf.seek(0)
     st.download_button("📥 PNG", buf, "arch.png", "image/png")
+    
+    plt.close(fig)   # good hygiene; prevents memory build-up
+
     
     st.divider()
 
@@ -490,8 +635,32 @@ if st.session_state.results:
             fig_l = plot_loading(g_s, L_s)
             fig_l.savefig(load_png, dpi=200, bbox_inches="tight")
             plt.close(fig_l)
-    
-            fig_r = plot_results(sol, L_s, f_s, clusters)
+            
+            # recompute a_sol for export (use same inputs b_eff, fcd)
+            V_sol_exp = np.interp(sol["x"], st.session_state.beam_x, st.session_state.beam_V)
+            N_sol_exp = np.sqrt(sol["H"]**2 + V_sol_exp**2)
+            
+            if b_eff > 0 and fcd > 0:
+                fcd_kNpm2_exp = 1000.0 * fcd
+                a_sol_exp = N_sol_exp / (b_eff * fcd_kNpm2_exp)
+                i_exp = int(np.argmax(a_sol_exp))
+                a_max_exp = float(a_sol_exp[i_exp])
+                x_a_exp = float(sol["x"][i_exp])
+                N_max_exp = float(np.max(N_sol_exp))
+                t_total_exp = float(sol["t_req"] + a_max_exp)
+            else:
+                a_sol_exp = None
+                a_max_exp = float("nan")
+                x_a_exp = float("nan")
+                N_max_exp = float(np.max(N_sol_exp))
+                t_total_exp = float("nan")
+
+
+            
+            # you already computed N_sol_exp above
+            fig_r = plot_results(sol, L_s, f_s, clusters, a_sol=a_sol_exp, V_sol=V_sol_exp, N_sol=N_sol_exp)
+
+
             fig_r.savefig(res_png, dpi=200, bbox_inches="tight")
             plt.close(fig_r)
     
@@ -505,8 +674,11 @@ if st.session_state.results:
                 RA=RA, RB=RB,
                 info={"project": proj, "author": auth, "date": str(date)},
                 load_png=load_png, res_png=res_png,
-                beam_x=x_b, beam_V=V_b, beam_M=M_b, beam_RA=RA_b, beam_RB=RB_b
+                beam_x=x_b, beam_V=V_b, beam_M=M_b, beam_RA=RA_b, beam_RB=RB_b,
+                b_eff=b_eff, fcd=fcd,
+                N_max=N_max_exp, a_max=a_max_exp, x_a=x_a_exp, t_total=t_total_exp
             )
+
     
     if st.session_state.docx_bytes is not None:
         st.download_button(
