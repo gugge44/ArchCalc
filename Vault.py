@@ -460,121 +460,147 @@ def contact_clusters(xx, e, delta):
 
 def plot_results(sol, L, f, clusters, a_sol=None, V_sol=None, N_sol=None):
     """
-    Plot geometry, thrust line, beam moment, normal offset, and compressive force.
+    Plot:
+      1) Arch geometry band (±t/2) and the admissible thrust line.
+         If a_sol is supplied, also plot dashed envelope for total thickness:
+             ±(t/2 + a(x)/2)
+      2) Equivalent simply-supported beam moment M(x)
+      3) Normal eccentricity e(x) and the minimax bounds ±delta
+      4) Resultant compression N(x) and (optionally) strut thickness a(x)
 
     Parameters
     ----------
     sol : dict
-        Solution dictionary returned by compute_for_H / find_best_H
+        Solution from compute_for_H / find_best_H. Must contain:
+        x, yc, nx, ny, e, M, H, t_req, delta
     L, f : float
-        Arch span and rise [m]
-    clusters : list
-        Contact clusters from contact_clusters (potential hinge locations)
+        Span and rise used to compute normals for hinge markers.
+    clusters : list[(i0, i1, sgn)]
+        Contact clusters from contact_clusters. sgn=+1 extrados, -1 intrados.
     a_sol : ndarray or None
-        Required compressive strut thickness a(x) [m]
+        Compression strut thickness a(x) [m] (capacity-driven extra thickness).
     V_sol : ndarray or None
-        Vertical shear V(x) from equivalent beam [kN]
+        Equivalent-beam shear V(x) [kN] at sol["x"] stations.
     N_sol : ndarray or None
-        Resultant compressive force N(x) = sqrt(H^2 + V^2) [kN]
+        Resultant compression N(x) = sqrt(H^2 + V^2) [kN] at sol["x"] stations.
     """
+    # --- unpack solution arrays ---
+    xx = sol["x"]      # stations along span [m]
+    yc = sol["yc"]     # centreline y(x) [m]
+    nx = sol["nx"]     # unit normal x-component [-]
+    ny = sol["ny"]     # unit normal y-component [-]
+    e  = sol["e"]      # normal offset of thrust line from centreline [m]
+    t  = sol["t_req"]  # geometric thickness required for containment = 2*delta [m]
+    H  = sol["H"]      # horizontal thrust [kN]
 
-    # Unpack solution fields
-    xx, yc, nx, ny, e = sol["x"], sol["yc"], sol["nx"], sol["ny"], sol["e"]
-    t, H = sol["t_req"], sol["H"]
-
-    # If compressive force not supplied, try to infer it
+    # If N(x) not supplied but V(x) is, infer N(x)
     if N_sol is None and V_sol is not None:
         N_sol = np.sqrt(H**2 + V_sol**2)
 
-    # Set up 4 vertically stacked plots:
-    #   1) Geometry + thrust line
-    #   2) Beam moment M(x)
-    #   3) Normal offset e(x)
-    #   4) Compressive force N(x) and strut thickness a(x)
+    # 4 stacked plots: geometry, M, e, N
     fig, axes = plt.subplots(
         4, 1, figsize=(12, 12),
         gridspec_kw={"height_ratios": [2.2, 1.1, 1.1, 1.1]}
     )
 
-    # ------------------------------------------------------------
+    # ============================================================
     # (1) Geometry + thrust line
-    # ------------------------------------------------------------
+    # ============================================================
     ax = axes[0]
 
-    # Plot intrados / extrados band
-    x_up = xx + (t / 2) * nx
-    y_up = yc + (t / 2) * ny
-    x_dn = xx - (t / 2) * nx
-    y_dn = yc - (t / 2) * ny
+    # If a(x) is provided, plot dashed total envelope:
+    #   ±(t/2 + a(x)/2) along the local normal
+    if a_sol is not None:
+        a = a_sol
+        ax.plot(
+            xx + (t/2 + a/2) * nx,
+            yc + (t/2 + a/2) * ny,
+            "k--", lw=1.2, label="Envelope + strut"
+        )
+        ax.plot(
+            xx - (t/2 + a/2) * nx,
+            yc - (t/2 + a/2) * ny,
+            "k--", lw=1.2
+        )
+
+    # Plot the geometric band (±t/2) as a filled polygon
+    x_up = xx + (t/2) * nx
+    y_up = yc + (t/2) * ny
+    x_dn = xx - (t/2) * nx
+    y_dn = yc - (t/2) * ny
     ax.fill(np.r_[x_up, x_dn[::-1]], np.r_[y_up, y_dn[::-1]], alpha=0.2)
+
+    # Intrados/extrados edges for the geometric thickness only
     ax.plot(x_up, y_up, "k-", lw=1.5)
     ax.plot(x_dn, y_dn, "k-", lw=1.5)
 
-    # Centreline and thrust line
+    # Centreline and thrust line (thrust line plotted by offsetting centreline by e along normal)
     ax.plot(xx, yc, "b-", lw=2, alpha=0.7, label="Centreline")
     ax.plot(xx + e * nx, yc + e * ny, "r--", lw=2, label="Thrust line")
 
-    # Mark contact (hinge) locations
+    # Mark hinge/contact clusters at the boundary: extrados (+) or intrados (-)
     for i0, i1, sgn in clusters:
-        xh = 0.5 * (xx[i0] + xx[i1])
+        xh = 0.5 * (xx[i0] + xx[i1])               # representative x within cluster
         nxh, nyh = unit_normal(np.array([xh]), L, f)
         ych = y_arch(xh, L, f)
         ax.plot(
-            xh + sgn * t / 2 * nxh[0],
-            ych + sgn * t / 2 * nyh[0],
+            xh + sgn * t/2 * nxh[0],
+            ych + sgn * t/2 * nyh[0],
             "go", ms=12, mec="k", mew=2
         )
 
-    ax.set_title(f"Thrust line containment | H = {H:.1f} kN,  t_req = {t*1000:.1f} mm")
-    ax.set_aspect("equal")
-    ax.grid(alpha=0.25)
+    ax.set_title(f"H = {H:.1f} kN, t_req = {t*1000:.1f} mm")
     ax.legend()
+    ax.grid(alpha=0.25)
+    ax.set_aspect("equal")
 
-    # ------------------------------------------------------------
-    # (2) Beam moment diagram
-    # ------------------------------------------------------------
+    # ============================================================
+    # (2) Equivalent beam moment M(x)
+    # ============================================================
     axes[1].fill_between(xx, sol["M"], alpha=0.3)
     axes[1].plot(xx, sol["M"], lw=2)
-    axes[1].set_title("Equivalent simply-supported beam moment M(x)")
+    axes[1].set_title("Beam Moment")
     axes[1].grid(alpha=0.25)
 
-    # ------------------------------------------------------------
-    # (3) Normal offset e(x)
-    # ------------------------------------------------------------
+    # ============================================================
+    # (3) Normal offset e(x) with minimax bounds ±delta
+    # ============================================================
     axes[2].fill_between(xx, e, alpha=0.3)
     axes[2].plot(xx, e, lw=2)
     axes[2].axhline(sol["delta"], ls="--")
     axes[2].axhline(-sol["delta"], ls="--")
-    axes[2].set_title(f"Normal offset e(x),  δ = {sol['delta']*1000:.1f} mm")
+    axes[2].set_title(f"Normal Offset δ = {sol['delta']*1000:.1f} mm")
     axes[2].grid(alpha=0.25)
 
-    # ------------------------------------------------------------
-    # (4) Compressive force and strut thickness
-    # ------------------------------------------------------------
+    # ============================================================
+    # (4) Compressive resultant N(x) and strut thickness a(x)
+    # ============================================================
     axN = axes[3]
 
     if N_sol is not None:
-        lineN, = axN.plot(xx, N_sol, lw=2, label="N(x) compressive force [kN]")
+        lineN, = axN.plot(xx, N_sol, lw=2, label="N(x) compressive resultant (kN)")
         axN.fill_between(xx, N_sol, alpha=0.2)
         axN.set_ylabel("N (kN)")
         axN.grid(alpha=0.25)
 
-        lines, labels = [lineN], [lineN.get_label()]
+        lines = [lineN]
+        labels = [lineN.get_label()]
 
         if a_sol is not None:
             axA = axN.twinx()
-            lineA, = axA.plot(xx, a_sol * 1000, "--", lw=1.8, label="a(x) strut thickness [mm]")
+            lineA, = axA.plot(xx, a_sol * 1000.0, ls="--", lw=1.8, label="a(x) strut thickness (mm)")
             axA.set_ylabel("a (mm)")
             lines.append(lineA)
             labels.append(lineA.get_label())
 
-        axN.legend(lines, labels, loc="upper center", ncol=2)
         axN.set_title("Compressive resultant and required strut thickness")
+        axN.legend(lines, labels, loc="upper center", ncol=2)
     else:
         axN.set_title("Compressive resultant N(x) (not available)")
         axN.grid(alpha=0.25)
 
     axN.set_xlabel("x (m)")
+
     plt.tight_layout()
     return fig
     
@@ -793,6 +819,7 @@ if __name__ == "__main__":
     RB = result["RB"]
     i = int(np.argmax(a_sol))
     x_a = float(sol["x"][i])
+    
     
     clusters = contact_clusters(sol["x"], sol["e"], sol["delta"])
     
